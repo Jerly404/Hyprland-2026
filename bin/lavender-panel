@@ -1,0 +1,1204 @@
+#!/usr/bin/python3
+"""macOS Control Center and on-demand GTK3 layer-shell panels."""
+import os, signal, sys
+from pathlib import Path
+
+# Speed up GTK initialization and silence accessibility bus timeouts
+os.environ["NO_AT_BRIDGE"] = "1"
+os.environ.setdefault("FONTCONFIG_FILE", os.path.expanduser("~/.config/waybar/fonts.conf"))
+
+H = Path.home()
+R = Path(os.environ.get('XDG_RUNTIME_DIR', '/tmp'))
+pidfile = R / 'lavender-panel.pid'
+section = sys.argv[1] if len(sys.argv) > 1 else 'system'
+target_monitor = sys.argv[2] if len(sys.argv) > 2 else os.environ.get('LAVENDER_OUTPUT', '')
+
+# Fast-path: Instant toggle (< 2ms) without importing GTK/PyGObject
+if pidfile.exists():
+    try:
+        content = pidfile.read_text().split()
+        if len(content) >= 2:
+            pid, prior = int(content[0]), content[1]
+            prior_mon = content[2] if len(content) >= 3 else ''
+            try:
+                cmdline = Path(f'/proc/{pid}/cmdline').read_bytes()
+                if b'lavender-panel' in cmdline:
+                    os.kill(pid, signal.SIGTERM)
+                    # If same section and same monitor, toggle off!
+                    if prior == section and (not target_monitor or prior_mon == target_monitor):
+                        sys.exit(0)
+            except (OSError, ProcessLookupError):
+                pass
+    except (OSError, ValueError):
+        pass
+
+pidfile.write_text(f'{os.getpid()} {section} {target_monitor}')
+
+import gi
+for lib, version in [('Gtk', '3.0'), ('Gdk', '3.0'), ('GtkLayerShell', '0.1')]:
+    gi.require_version(lib, version)
+from gi.repository import Gtk, Gdk, GLib, GtkLayerShell as Layer, Pango
+try:
+    from gi.repository import GLibUnix
+except ImportError:
+    GLibUnix = None
+
+import datetime, json, re, socket, subprocess, threading, time, html
+from concurrent.futures import ThreadPoolExecutor
+
+def run_cmd(cmd, timeout=4):
+    try:
+        p = subprocess.run(cmd, shell=isinstance(cmd, str), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        return p.stdout.strip()
+    except Exception:
+        return ''
+
+def get_hypr_cursor():
+    sig = os.environ.get('HYPRLAND_INSTANCE_SIGNATURE')
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    if sig and runtime:
+        sock_path = f"{runtime}/hypr/{sig}/.socket.sock"
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(0.04)
+                s.connect(sock_path)
+                s.sendall(b'j/cursorpos')
+                raw = s.recv(1024)
+                return json.loads(raw.decode())
+        except Exception:
+            pass
+    try:
+        p = subprocess.run(['hyprctl', '-j', 'cursorpos'], capture_output=True, text=True, timeout=0.1)
+        return json.loads(p.stdout)
+    except Exception:
+        return None
+
+def spawn_cmd(cmd):
+    if isinstance(cmd, str):
+        cmd = cmd.split()
+    subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+class Panel(Gtk.Window):
+    def __init__(self):
+        super().__init__()
+        self.set_name('lavender-panel')
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_size_request(330, -1)
+        self.alive = True
+        self.updating_sliders = False
+
+        Layer.init_for_window(self)
+        Layer.set_namespace(self, 'waybar')
+        Layer.set_layer(self, Layer.Layer.OVERLAY)
+        Layer.set_exclusive_zone(self, -1)
+        Layer.set_keyboard_mode(self, Layer.KeyboardMode.NONE)
+        Layer.set_anchor(self, Layer.Edge.RIGHT, True)
+        Layer.set_anchor(self, Layer.Edge.TOP, True)
+        Layer.set_margin(self, Layer.Edge.RIGHT, 14)
+        Layer.set_margin(self, Layer.Edge.TOP, 42)
+
+        target_output = sys.argv[2] if len(sys.argv) > 2 else os.environ.get('LAVENDER_OUTPUT')
+        try:
+            monitors = json.loads(run_cmd(['hyprctl', '-j', 'monitors']))
+            cursor = get_hypr_cursor() or json.loads(run_cmd(['hyprctl', '-j', 'cursorpos']))
+            main = next(
+                (m for m in monitors if m['name'] == target_output),
+                next((m for m in monitors if m['x'] <= cursor['x'] < m['x'] + m['width'] / m['scale'] and m['y'] <= cursor['y'] < m['y'] + m['height'] / m['scale']), monitors[0])
+            )
+            self.monitor_name = main['name']
+            display = Gdk.Display.get_default()
+            for i in range(display.get_n_monitors()):
+                m = display.get_monitor(i)
+                g = m.get_geometry()
+                if g.x == main['x'] and g.y == main['y']:
+                    Layer.set_monitor(self, m)
+                    break
+            max_h = min(560, int(main['height'] / main['scale']) - 80)
+        except Exception:
+            self.monitor_name = 'DP-2'
+            main = {'x': 0, 'y': 0, 'width': 1920, 'height': 1080, 'scale': 1.0}
+            cursor = {'x': 1800, 'y': 18}
+            max_h = 540
+
+        # Auto-dismiss on pointer leave tracking
+        try:
+            self.mon_x = float(main.get('x', 0))
+            self.mon_y = float(main.get('y', 0))
+            self.mon_scale = float(main.get('scale', 1.0)) or 1.0
+            self.mon_w = float(main.get('width', 1920)) / self.mon_scale
+            self.mon_h = float(main.get('height', 1080)) / self.mon_scale
+        except Exception:
+            self.mon_x, self.mon_y, self.mon_scale, self.mon_w, self.mon_h = 0.0, 0.0, 1.0, 1920.0, 1080.0
+
+        self.init_cursor = cursor if isinstance(cursor, dict) else {'x': self.mon_x + self.mon_w - 40, 'y': self.mon_y + 18}
+        init_cy = self.init_cursor.get('y', 0)
+        self.started_on_bar = (self.mon_y <= init_cy <= self.mon_y + 46)
+        self.has_entered_panel = False
+        self.mouse_down = False
+        self.popup_active = False
+        self.leave_start_time = None
+
+        self.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        self.connect('enter-notify-event', self.on_enter_notify)
+        self.connect('leave-notify-event', self.on_leave_notify)
+        self.connect('event', self.on_window_event)
+        self.connect('destroy', self.finish)
+        self.connect('key-press-event', self.key)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        outer.set_border_width(14)
+        self.add(outer)
+
+        head = Gtk.Box(spacing=8)
+        outer.pack_start(head, False, False, 0)
+
+        titles = {
+            'system': 'Centro de control',
+            'connectivity': 'Conectividad',
+            'audio': 'Sonido y Audio',
+            'media': 'Multimedia',
+            'power': 'Batería y Energía',
+            'extras': 'Más controles',
+            'calendar': 'Calendario'
+        }
+        title = Gtk.Label(label=titles.get(section, 'Centro de control'))
+        title.set_xalign(0)
+        title.get_style_context().add_class('title')
+        head.pack_start(title, True, True, 0)
+
+        # Scrolled window that does NOT intercept horizontal sliders
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_max_content_height(max_h)
+        outer.pack_start(scroll, True, True, 0)
+
+        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        scroll.add(self.body)
+
+        builder = getattr(self, 'build_' + section, self.build_system)
+        builder()
+
+        self.show_all()
+        self.present()
+        self.refresh_data()
+        GLib.timeout_add_seconds(3, self.refresh_data)
+        GLib.timeout_add(50, self.check_pointer_leave)
+
+    def on_window_event(self, widget, event):
+        if event.type == Gdk.EventType.BUTTON_PRESS:
+            self.mouse_down = True
+        elif event.type == Gdk.EventType.BUTTON_RELEASE:
+            self.mouse_down = False
+        return False
+
+    def on_enter_notify(self, widget, event):
+        self.has_entered_panel = True
+        self.leave_start_time = None
+        return False
+
+    def on_leave_notify(self, widget, event):
+        if event.detail != Gdk.NotifyType.INFERIOR:
+            if not self.mouse_down and not self.popup_active:
+                if self.leave_start_time is None:
+                    self.leave_start_time = time.monotonic()
+        return False
+
+    def is_cursor_inside(self, cx, cy):
+        alloc = self.get_allocation()
+        panel_w = max(330, alloc.width if alloc.width > 50 else 330)
+        panel_h = max(120, alloc.height if alloc.height > 50 else 200)
+
+        panel_r = self.mon_x + self.mon_w - 14
+        panel_l = panel_r - panel_w
+        panel_t = self.mon_y + 42
+        panel_b = panel_t + panel_h
+
+        # Zone 1: Inside panel itself (with 14px cushion)
+        if (panel_l - 14 <= cx <= panel_r + 14) and (panel_t - 8 <= cy <= panel_b + 14):
+            return True
+
+        # Zone 2: Inside top bar & gap between icon and panel
+        init_x = self.init_cursor.get('x', panel_l)
+        bar_left = min(panel_l - 14, init_x - 50)
+        bar_right = self.mon_x + self.mon_w
+        if (bar_left <= cx <= bar_right) and (self.mon_y - 6 <= cy <= panel_t + 4):
+            return True
+
+        return False
+
+    def check_pointer_leave(self):
+        if not self.alive:
+            return False
+
+        if self.mouse_down or self.popup_active:
+            self.leave_start_time = None
+            return True
+
+        pos = get_hypr_cursor()
+        if not pos:
+            return True
+
+        cx, cy = pos.get('x', -9999), pos.get('y', -9999)
+        inside = self.is_cursor_inside(cx, cy)
+
+        if inside:
+            self.leave_start_time = None
+            if cy >= self.mon_y + 40:
+                self.has_entered_panel = True
+            return True
+
+        # Outside the active zone
+        if self.started_on_bar or self.has_entered_panel:
+            now = time.monotonic()
+            if self.leave_start_time is None:
+                self.leave_start_time = now
+            elif (now - self.leave_start_time) >= 0.20:
+                self.close()
+                return False
+
+        return True
+
+    def finish(self, *_):
+        self.alive = False
+        if pidfile.exists() and pidfile.read_text().startswith(str(os.getpid()) + ' '):
+            pidfile.unlink()
+        Gtk.main_quit()
+
+    def key(self, _, event):
+        if event.keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
+        return False
+
+    def disable_scroll(self, widget):
+        """Block child widgets from hijacking scroll wheel events away from the page."""
+        widget.connect('scroll-event', lambda w, e: True)
+
+    # ==========================================
+    # macOS CONTROL CENTER (system)
+    # ==========================================
+    def build_system(self):
+        # 1. 2x2 Grid of Quick Toggle Cards
+        grid = Gtk.Grid()
+        grid.set_column_spacing(8)
+        grid.set_row_spacing(8)
+        grid.set_column_homogeneous(True)
+        self.body.pack_start(grid, False, False, 0)
+
+        # Wi-Fi Card
+        self.wifi_btn, self.wifi_circle, self.wifi_sub = self.make_toggle_widget('󰖩', 'Wi-Fi', 'Buscando…', 'active')
+        self.wifi_btn.connect('clicked', self.toggle_wifi)
+        self.wifi_btn.connect('button-press-event', lambda w, e: self.on_right_click(e, 'nm-connection-editor'))
+        grid.attach(self.wifi_btn, 0, 0, 1, 1)
+
+        # Bluetooth Card
+        self.bt_btn, self.bt_circle, self.bt_sub = self.make_toggle_widget('', 'Bluetooth', 'Iniciando…', 'active')
+        self.bt_btn.connect('clicked', self.toggle_bluetooth)
+        self.bt_btn.connect('button-press-event', lambda w, e: self.on_right_click(e, 'blueman-manager'))
+        grid.attach(self.bt_btn, 1, 0, 1, 1)
+
+        # Do Not Disturb (No molestar) Card
+        self.dnd_btn, self.dnd_circle, self.dnd_sub = self.make_toggle_widget('󰂚', 'No molestar', 'Desactivado', 'active-purple')
+        self.dnd_btn.connect('clicked', self.toggle_dnd)
+        grid.attach(self.dnd_btn, 0, 1, 1, 1)
+
+        # Night Shift (Luz nocturna) Card
+        self.night_btn, self.night_circle, self.night_sub = self.make_toggle_widget('󰌵', 'Luz nocturna', 'Desactivada', 'active-amber')
+        self.night_btn.connect('clicked', self.toggle_nightlight)
+        grid.attach(self.night_btn, 1, 1, 1, 1)
+
+        # 2. Display / Brightness Card (Independent per monitor)
+        disp_title = self.get_display_name()
+        disp_card, self.bright_scale, self.bright_val = self.make_slider_widget('󰃠', disp_title, 100, self.on_brightness_change)
+        self.body.pack_start(disp_card, False, False, 0)
+
+        # 3. Sound / Volume Card
+        sound_card, self.vol_scale, self.vol_val = self.make_slider_widget('󰕾', 'Sonido', 50, self.on_volume_change, self.toggle_mute)
+        self.body.pack_start(sound_card, False, False, 0)
+
+        # 4. Media Player Card
+        media_card, self.media_icon, self.media_title, self.media_artist, self.media_play_btn = self.make_media_widget()
+        self.body.pack_start(media_card, False, False, 0)
+
+        # 5. Battery & Power Card
+        power_card, self.bat_lbl = self.make_battery_widget()
+        self.body.pack_start(power_card, False, False, 0)
+
+    def on_right_click(self, event, cmd):
+        if event.button == 3:
+            self.close()
+            spawn_cmd(cmd)
+            return True
+        return False
+
+    def make_toggle_widget(self, icon_char, title_str, sub_str, active_class='active'):
+        btn = Gtk.Button()
+        btn.get_style_context().add_class('mac-toggle-btn')
+        self.disable_scroll(btn)
+
+        hbox = Gtk.Box(spacing=8)
+        btn.add(hbox)
+
+        circle = Gtk.Label(label=icon_char)
+        circle.get_style_context().add_class('mac-icon-circle')
+        circle.set_size_request(34, 34)
+        hbox.pack_start(circle, False, False, 0)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        title = Gtk.Label(label=title_str)
+        title.set_xalign(0)
+        title.get_style_context().add_class('mac-toggle-title')
+        vbox.pack_start(title, False, False, 0)
+
+        sub = Gtk.Label(label=sub_str)
+        sub.set_xalign(0)
+        sub.set_ellipsize(Pango.EllipsizeMode.END)
+        sub.set_max_width_chars(11)
+        sub.get_style_context().add_class('mac-toggle-sub')
+        vbox.pack_start(sub, False, False, 0)
+
+        hbox.pack_start(vbox, True, True, 0)
+        btn.active_class = active_class
+        return btn, circle, sub
+
+    def make_slider_widget(self, icon_char, title_str, init_val, on_change, on_icon_click=None):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.get_style_context().add_class('mac-card')
+
+        header = Gtk.Box(spacing=6)
+        card.pack_start(header, False, False, 0)
+
+        icon_btn = Gtk.Button()
+        icon_btn.get_style_context().add_class('mac-icon-btn')
+        icon_lbl = Gtk.Label(label=icon_char)
+        icon_btn.add(icon_lbl)
+        if on_icon_click:
+            icon_btn.connect('clicked', lambda _: on_icon_click())
+        header.pack_start(icon_btn, False, False, 0)
+
+        title = Gtk.Label(label=title_str)
+        title.set_xalign(0)
+        title.get_style_context().add_class('mac-slider-title')
+        header.pack_start(title, True, True, 0)
+
+        val_label = Gtk.Label(label=f"{init_val}%")
+        val_label.get_style_context().add_class('mac-slider-val')
+        header.pack_end(val_label, False, False, 0)
+
+        adj = Gtk.Adjustment(value=init_val, lower=0, upper=100, step_increment=1, page_increment=5)
+        scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=adj)
+        scale.set_draw_value(False)
+        scale.get_style_context().add_class('mac-scale')
+        # Crucial: Protect mouse wheel scroll from accidentally changing settings!
+        self.disable_scroll(scale)
+
+        def on_val_changed(sc):
+            if self.updating_sliders:
+                return
+            v = int(sc.get_value())
+            val_label.set_text(f"{v}%")
+            on_change(v)
+
+        scale.connect('value-changed', on_val_changed)
+        card.pack_start(scale, False, False, 0)
+        return card, scale, val_label
+
+    def make_media_widget(self):
+        card = Gtk.Box(spacing=10)
+        card.get_style_context().add_class('mac-card')
+
+        icon_circle = Gtk.Label(label="󰎆")
+        icon_circle.get_style_context().add_class('mac-media-icon')
+        icon_circle.set_size_request(36, 36)
+        card.pack_start(icon_circle, False, False, 0)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        title_lbl = Gtk.Label(label="Sin reproducción")
+        title_lbl.set_xalign(0)
+        title_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        title_lbl.set_max_width_chars(15)
+        title_lbl.get_style_context().add_class('mac-media-title')
+        vbox.pack_start(title_lbl, False, False, 0)
+
+        artist_lbl = Gtk.Label(label="Multimedia")
+        artist_lbl.set_xalign(0)
+        artist_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        artist_lbl.set_max_width_chars(15)
+        artist_lbl.get_style_context().add_class('mac-media-artist')
+        vbox.pack_start(artist_lbl, False, False, 0)
+
+        card.pack_start(vbox, True, True, 0)
+
+        ctrls = Gtk.Box(spacing=2)
+        prev_btn = Gtk.Button(label="󰒮")
+        prev_btn.get_style_context().add_class('mac-media-ctrl')
+        prev_btn.connect('clicked', lambda _: (spawn_cmd(['playerctl', 'previous']), GLib.timeout_add(200, self.refresh_data)))
+        ctrls.pack_start(prev_btn, False, False, 0)
+
+        play_btn = Gtk.Button(label="󰐊")
+        play_btn.get_style_context().add_class('mac-media-ctrl')
+        play_btn.connect('clicked', lambda _: (spawn_cmd(['playerctl', 'play-pause']), GLib.timeout_add(200, self.refresh_data)))
+        ctrls.pack_start(play_btn, False, False, 0)
+
+        next_btn = Gtk.Button(label="󰒭")
+        next_btn.get_style_context().add_class('mac-media-ctrl')
+        next_btn.connect('clicked', lambda _: (spawn_cmd(['playerctl', 'next']), GLib.timeout_add(200, self.refresh_data)))
+        ctrls.pack_start(next_btn, False, False, 0)
+
+        card.pack_start(ctrls, False, False, 0)
+        return card, icon_circle, title_lbl, artist_lbl, play_btn
+
+    def make_battery_widget(self):
+        card = Gtk.Box(spacing=8)
+        card.get_style_context().add_class('mac-card')
+
+        bat_lbl = Gtk.Label(label="󰁹  Batería")
+        bat_lbl.set_xalign(0)
+        bat_lbl.get_style_context().add_class('mac-bat-label')
+        card.pack_start(bat_lbl, True, True, 0)
+
+        lock_btn = Gtk.Button(label="󰌾")
+        lock_btn.set_tooltip_text("Bloquear")
+        lock_btn.get_style_context().add_class('mac-pill-btn')
+        lock_btn.connect('clicked', lambda _: (self.close(), spawn_cmd('hyprlock || swaylock')))
+        card.pack_start(lock_btn, False, False, 0)
+
+        suspend_btn = Gtk.Button(label="󰤄")
+        suspend_btn.set_tooltip_text("Suspender")
+        suspend_btn.get_style_context().add_class('mac-pill-btn')
+        suspend_btn.connect('clicked', lambda _: (self.close(), spawn_cmd('systemctl suspend')))
+        card.pack_start(suspend_btn, False, False, 0)
+
+        power_btn = Gtk.Button(label="󰐥")
+        power_btn.set_tooltip_text("Opciones de sesión y apagado")
+        power_btn.get_style_context().add_class('mac-pill-btn')
+        power_btn.connect('clicked', lambda _: (self.close(), spawn_cmd(str(H / '.local/bin/lavender-logout'))))
+        card.pack_start(power_btn, False, False, 0)
+
+        return card, bat_lbl
+
+    # ==========================================
+    # USER ACTIONS
+    # ==========================================
+    def toggle_wifi(self, _=None):
+        p = run_cmd(['nmcli', 'radio', 'wifi'])
+        is_on = 'enabled' in p
+        spawn_cmd(['nmcli', 'radio', 'wifi', 'off' if is_on else 'on'])
+        GLib.timeout_add(300, self.refresh_data)
+
+    def toggle_bluetooth(self, _=None):
+        p = run_cmd(['bluetoothctl', 'show'])
+        is_on = 'Powered: yes' in p
+        spawn_cmd(['bluetoothctl', 'power', 'off' if is_on else 'on'])
+        GLib.timeout_add(300, self.refresh_data)
+
+    def toggle_dnd(self, _=None):
+        spawn_cmd(['dunstctl', 'set-paused', 'toggle'])
+        GLib.timeout_add(100, self.refresh_data)
+
+    def toggle_nightlight(self, _=None):
+        spawn_cmd(['hyde-shell', 'hyprsunset', '-t', '-P', 'waybar:19'])
+        GLib.timeout_add(300, self.refresh_data)
+
+    def toggle_mute(self):
+        spawn_cmd(['wpctl', 'set-mute', '@DEFAULT_AUDIO_SINK@', 'toggle'])
+        GLib.timeout_add(150, self.refresh_data)
+
+    def is_ext_display(self):
+        return not (self.monitor_name.startswith('eDP') or self.monitor_name.startswith('LVDS'))
+
+    def get_display_name(self):
+        if self.is_ext_display():
+            return f"Pantalla ({self.monitor_name} · GS27QA)"
+        return f"Pantalla (Laptop · {self.monitor_name})"
+
+    def on_brightness_change(self, val):
+        val = max(5, int(val))
+        if self.is_ext_display():
+            spawn_cmd(['/home/jerly404/.local/bin/brightnesscontrol-ext.sh', 'set', str(val)])
+        else:
+            spawn_cmd(['brightnessctl', 'set', f"{val}%"])
+
+    def on_volume_change(self, val):
+        spawn_cmd(['wpctl', 'set-volume', '@DEFAULT_AUDIO_SINK@', f"{val}%"])
+
+    # ==========================================
+    # DATA REFRESHING (Threaded, non-blocking)
+    # ==========================================
+    def refresh_data(self):
+        if not self.alive:
+            return False
+
+        def fetch():
+            # Wi-Fi
+            wifi_ssid = ''
+            wifi_active = False
+            for line in run_cmd(['nmcli', '-t', '-f', 'ACTIVE,SSID', 'dev', 'wifi']).splitlines():
+                if line.startswith('yes:'):
+                    wifi_active = True
+                    wifi_ssid = line.split(':', 1)[1]
+                    break
+            if not wifi_active:
+                r = run_cmd(['nmcli', 'radio', 'wifi'])
+                wifi_ssid = 'Activado' if 'enabled' in r else 'Desactivado'
+                wifi_active = 'enabled' in r
+
+            # Bluetooth
+            bt_info = run_cmd(['bluetoothctl', 'show'])
+            bt_active = 'Powered: yes' in bt_info
+            bt_name = 'Desactivado'
+            if bt_active:
+                connected = run_cmd(['bluetoothctl', 'devices', 'Connected'])
+                names = [l.split(' ', 2)[2] for l in connected.splitlines() if len(l.split(' ', 2)) >= 3]
+                bt_name = names[0] if names else 'Activado'
+
+            # DND
+            dnd_active = run_cmd(['dunstctl', 'is-paused']).strip() == 'true'
+
+            # Nightlight
+            night_active = bool(run_cmd(['pgrep', '-x', 'hyprsunset']))
+
+            # Brightness for the active monitor
+            bright_val = 100
+            if self.is_ext_display():
+                try:
+                    bright_val = int(Path('/tmp/brightness-ext-cache').read_text().strip())
+                except Exception:
+                    out = run_cmd(['/home/jerly404/.local/bin/brightnesscontrol-ext.sh', 'get'])
+                    m = re.search(r'"percentage":\s*([0-9]+)', out)
+                    bright_val = int(m[1]) if m else 100
+            else:
+                b_parts = run_cmd(['brightnessctl', '-m']).split(',')
+                if len(b_parts) >= 4:
+                    try:
+                        bright_val = int(b_parts[3].rstrip('%'))
+                    except ValueError:
+                        pass
+
+            # Volume
+            vol_val = 50
+            vol_muted = False
+            v_out = run_cmd(['wpctl', 'get-volume', '@DEFAULT_AUDIO_SINK@'])
+            m = re.search(r'Volume: ([0-9.]+)', v_out)
+            if m:
+                vol_val = round(float(m[1]) * 100)
+            vol_muted = 'MUTED' in v_out
+
+            # Media
+            media_title = run_cmd(['playerctl', 'metadata', 'title'])
+            media_artist = run_cmd(['playerctl', 'metadata', 'artist'])
+            media_status = run_cmd(['playerctl', 'status'])
+
+            # Battery
+            bat_text = 'Alimentación CA'
+            for p in sorted(Path('/sys/class/power_supply').glob('*')):
+                if p.name == 'ACAD':
+                    continue
+                cap = (p / 'capacity').read_text().strip() if (p / 'capacity').exists() else None
+                stat = (p / 'status').read_text().strip() if (p / 'status').exists() else ''
+                if cap is not None:
+                    name = 'Batería' if p.name.startswith('BAT') else p.name
+                    icon = '󰂄' if stat in ('Charging', 'Full') else ('󰁹' if int(cap) > 80 else ('󰁾' if int(cap) > 30 else '󰁺'))
+                    bat_text = f"{icon} {name} {cap}% · {stat}"
+                    break
+
+            GLib.idle_add(self.update_ui, {
+                'wifi': (wifi_active, wifi_ssid),
+                'bt': (bt_active, bt_name),
+                'dnd': dnd_active,
+                'night': night_active,
+                'bright': bright_val,
+                'vol': (vol_val, vol_muted),
+                'media': (media_title, media_artist, media_status),
+                'bat': bat_text
+            })
+
+        threading.Thread(target=fetch, daemon=True).start()
+        return True
+
+    def update_ui(self, data):
+        if not self.alive:
+            return False
+
+        if hasattr(self, 'wifi_circle'):
+            w_act, w_ssid = data['wifi']
+            self.set_circle_active(self.wifi_circle, w_act, 'active')
+            self.wifi_sub.set_text(w_ssid or ('Activado' if w_act else 'Desactivado'))
+
+        if hasattr(self, 'bt_circle'):
+            b_act, b_name = data['bt']
+            self.set_circle_active(self.bt_circle, b_act, 'active')
+            self.bt_sub.set_text(b_name)
+
+        if hasattr(self, 'dnd_circle'):
+            d_act = data['dnd']
+            self.set_circle_active(self.dnd_circle, d_act, 'active-purple')
+            self.dnd_sub.set_text('Activado' if d_act else 'Desactivado')
+            self.dnd_circle.set_text('󰂛' if d_act else '󰂚')
+
+        if hasattr(self, 'night_circle'):
+            n_act = data['night']
+            self.set_circle_active(self.night_circle, n_act, 'active-amber')
+            self.night_sub.set_text('Activada' if n_act else 'Desactivada')
+
+        if hasattr(self, 'bright_scale'):
+            self.updating_sliders = True
+            b_val = data['bright']
+            self.bright_scale.set_value(b_val)
+            self.bright_val.set_text(f"{b_val}%")
+            self.updating_sliders = False
+
+        if hasattr(self, 'vol_scale'):
+            self.updating_sliders = True
+            v_val, v_muted = data['vol']
+            self.vol_scale.set_value(v_val)
+            self.vol_val.set_text('Silenciado' if v_muted else f"{v_val}%")
+            self.updating_sliders = False
+
+        if hasattr(self, 'media_title'):
+            m_title, m_artist, m_status = data['media']
+            if m_title:
+                self.media_title.set_text(m_title)
+                self.media_artist.set_text(m_artist or 'Reproduciendo')
+                self.media_play_btn.set_label('󰏤' if m_status == 'Playing' else '󰐊')
+            else:
+                self.media_title.set_text('Sin reproducción')
+                self.media_artist.set_text('Multimedia')
+                self.media_play_btn.set_label('󰐊')
+
+        if hasattr(self, 'bat_lbl'):
+            self.bat_lbl.set_text(data['bat'])
+
+        return False
+
+    def set_circle_active(self, label_widget, is_active, active_class):
+        ctx = label_widget.get_style_context()
+        for c in ['active', 'active-amber', 'active-purple']:
+            ctx.remove_class(c)
+        if is_active:
+            ctx.add_class(active_class)
+
+    # ==========================================
+    # DEDICATED PANELS (AUDIO, CONNECTIVITY, ETC)
+    # ==========================================
+    def build_audio(self):
+        # Master Output Card
+        sound_card, self.vol_scale, self.vol_val = self.make_slider_widget('󰕾', 'Salida de audio', 50, self.on_volume_change, self.toggle_mute)
+        self.body.pack_start(sound_card, False, False, 0)
+
+        # Output Devices Selector
+        dev_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        dev_card.get_style_context().add_class('mac-card')
+        dev_lbl = Gtk.Label(label="Dispositivo de salida")
+        dev_lbl.set_xalign(0)
+        dev_lbl.get_style_context().add_class('mac-slider-title')
+        dev_card.pack_start(dev_lbl, False, False, 0)
+
+        combo = Gtk.ComboBoxText()
+        self.disable_scroll(combo)
+        combo.connect('popup', lambda *_: setattr(self, 'popup_active', True))
+        combo.connect('popdown', lambda *_: setattr(self, 'popup_active', False))
+        devices = []
+        try:
+            devices = json.loads(run_cmd(['pactl', '-f', 'json', 'list', 'sinks']))
+        except Exception:
+            pass
+        default_sink = run_cmd(['pactl', 'get-default-sink'])
+        current = 0
+        for i, d in enumerate(devices):
+            combo.append(d['name'], d.get('description', d['name']))
+            if d['name'] == default_sink:
+                current = i
+        combo.set_active(current)
+        combo.connect('changed', lambda c: spawn_cmd(['pactl', 'set-default-sink', c.get_active_id()]) if c.get_active_id() else None)
+        dev_card.pack_start(combo, False, False, 0)
+        self.body.pack_start(dev_card, False, False, 0)
+
+        # Open pavucontrol button
+        mix_btn = Gtk.Button(label="󰓃  Abrir mezclador de volumen (Pavucontrol)")
+        mix_btn.get_style_context().add_class('mac-pill-btn')
+        mix_btn.connect('clicked', lambda _: (self.close(), spawn_cmd('pavucontrol -t 1')))
+        self.body.pack_start(mix_btn, False, False, 0)
+
+    def build_connectivity(self):
+        # Wi-Fi Section
+        wifi_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        wifi_card.get_style_context().add_class('mac-card')
+        w_head = Gtk.Box(spacing=8)
+        w_title = Gtk.Label(label="Wi-Fi")
+        w_title.set_xalign(0)
+        w_title.get_style_context().add_class('mac-slider-title')
+        w_head.pack_start(w_title, True, True, 0)
+
+        w_btn = Gtk.Button(label="Alternar Wi-Fi")
+        w_btn.get_style_context().add_class('mac-pill-btn')
+        w_btn.connect('clicked', self.toggle_wifi)
+        w_head.pack_end(w_btn, False, False, 0)
+        wifi_card.pack_start(w_head, False, False, 0)
+
+        w_editor = Gtk.Button(label="󰖩  Configurar conexiones de red…")
+        w_editor.get_style_context().add_class('mac-pill-btn')
+        w_editor.connect('clicked', lambda _: (self.close(), spawn_cmd('nm-connection-editor')))
+        wifi_card.pack_start(w_editor, False, False, 0)
+        self.body.pack_start(wifi_card, False, False, 0)
+
+        # Bluetooth Section
+        bt_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        bt_card.get_style_context().add_class('mac-card')
+        b_head = Gtk.Box(spacing=8)
+        b_title = Gtk.Label(label="Bluetooth")
+        b_title.set_xalign(0)
+        b_title.get_style_context().add_class('mac-slider-title')
+        b_head.pack_start(b_title, True, True, 0)
+
+        b_btn = Gtk.Button(label="Alternar Bluetooth")
+        b_btn.get_style_context().add_class('mac-pill-btn')
+        b_btn.connect('clicked', self.toggle_bluetooth)
+        b_head.pack_end(b_btn, False, False, 0)
+        bt_card.pack_start(b_head, False, False, 0)
+
+        b_mgr = Gtk.Button(label="  Administrador de dispositivos Bluetooth…")
+        b_mgr.get_style_context().add_class('mac-pill-btn')
+        b_mgr.connect('clicked', lambda _: (self.close(), spawn_cmd('blueman-manager')))
+        bt_card.pack_start(b_mgr, False, False, 0)
+        self.body.pack_start(bt_card, False, False, 0)
+
+    def build_power(self):
+        p_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        p_card.get_style_context().add_class('mac-card')
+
+        head_lbl = Gtk.Label(label="Alimentación y Batería")
+        head_lbl.set_xalign(0)
+        head_lbl.get_style_context().add_class('mac-slider-title')
+        p_card.pack_start(head_lbl, False, False, 0)
+
+        self.bat_lbl = Gtk.Label(label="Consultando batería…")
+        self.bat_lbl.set_xalign(0)
+        self.bat_lbl.get_style_context().add_class('mac-toggle-sub')
+        p_card.pack_start(self.bat_lbl, False, False, 0)
+        self.body.pack_start(p_card, False, False, 0)
+
+        # Power actions row
+        actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        lock = Gtk.Button(label="󰌾  Bloquear pantalla")
+        lock.get_style_context().add_class('mac-pill-btn')
+        lock.connect('clicked', lambda _: (self.close(), spawn_cmd('hyprlock || swaylock')))
+        actions.pack_start(lock, False, False, 0)
+
+        susp = Gtk.Button(label="󰤄  Suspender equipo")
+        susp.get_style_context().add_class('mac-pill-btn')
+        susp.connect('clicked', lambda _: (self.close(), spawn_cmd('systemctl suspend')))
+        actions.pack_start(susp, False, False, 0)
+
+        logout = Gtk.Button(label="󰐥  Opciones de apagado y reinicio…")
+        logout.get_style_context().add_class('mac-pill-btn')
+        logout.connect('clicked', lambda _: (self.close(), spawn_cmd(str(H / '.local/bin/lavender-logout'))))
+        actions.pack_start(logout, False, False, 0)
+        self.body.pack_start(actions, False, False, 0)
+
+    def build_calendar(self):
+        cal_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        cal_card.get_style_context().add_class('mac-card')
+
+        date_lbl = Gtk.Label(label=datetime.datetime.now().strftime('%A, %d de %B de %Y'))
+        date_lbl.set_xalign(0)
+        date_lbl.get_style_context().add_class('mac-slider-title')
+        cal_card.pack_start(date_lbl, False, False, 0)
+
+        cal = Gtk.Calendar()
+        self.disable_scroll(cal)
+        cal_card.pack_start(cal, False, False, 0)
+        self.body.pack_start(cal_card, False, False, 0)
+
+    def build_media(self):
+        media_card, self.media_icon, self.media_title, self.media_artist, self.media_play_btn = self.make_media_widget()
+        self.body.pack_start(media_card, False, False, 0)
+
+    def build_extras(self):
+        self.build_system()
+
+
+# Dynamic Styling (Dark / Light)
+theme_mode_path = H / '.config/macos-desktop/theme-mode'
+is_dark = (theme_mode_path.read_text().strip() if theme_mode_path.exists() else 'dark') != 'light'
+
+if is_dark:
+    css_content = b'''
+    #lavender-panel {
+        background: rgba(24, 28, 38, 0.90);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 18px;
+        color: #f1f5f9;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+    }
+    #lavender-panel * {
+        font-family: "Inter", "Symbols Nerd Font";
+        font-size: 13px;
+    }
+    .title {
+        font-size: 17px;
+        font-weight: 700;
+        color: #ffffff;
+        letter-spacing: -0.2px;
+    }
+    .mac-card {
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 10px 12px;
+    }
+    .mac-toggle-btn {
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 8px 10px;
+        transition: all 120ms ease;
+    }
+    .mac-toggle-btn:hover {
+        background: rgba(255, 255, 255, 0.12);
+        border-color: rgba(255, 255, 255, 0.14);
+    }
+    .mac-toggle-btn:active {
+        background: rgba(255, 255, 255, 0.20);
+    }
+    .mac-icon-circle {
+        min-width: 34px;
+        min-height: 34px;
+        border-radius: 17px;
+        background: rgba(255, 255, 255, 0.10);
+        color: #94a3b8;
+        font-size: 15px;
+    }
+    .mac-icon-circle.active {
+        background: #0a84ff;
+        color: #ffffff;
+    }
+    .mac-icon-circle.active-amber {
+        background: #ff9f0a;
+        color: #ffffff;
+    }
+    .mac-icon-circle.active-purple {
+        background: #5e5ce6;
+        color: #ffffff;
+    }
+    .mac-toggle-title {
+        font-size: 12.5px;
+        font-weight: 700;
+        color: #f8fafc;
+    }
+    .mac-toggle-sub {
+        font-size: 11px;
+        color: #94a3b8;
+    }
+    .mac-slider-title {
+        font-size: 12.5px;
+        font-weight: 700;
+        color: #f1f5f9;
+    }
+    .mac-slider-val {
+        font-size: 12px;
+        font-weight: 600;
+        color: #94a3b8;
+    }
+    .mac-icon-btn {
+        background: transparent;
+        border: none;
+        padding: 2px;
+        color: #cbd5e1;
+    }
+    .mac-icon-btn:hover {
+        color: #ffffff;
+    }
+    scale.mac-scale {
+        min-height: 24px;
+        padding: 2px 0;
+    }
+    scale.mac-scale trough {
+        min-height: 18px;
+        border-radius: 9px;
+        background: rgba(255, 255, 255, 0.10);
+        border: none;
+    }
+    scale.mac-scale highlight {
+        min-height: 18px;
+        border-radius: 9px;
+        background: #0a84ff;
+        border: none;
+    }
+    scale.mac-scale slider {
+        min-width: 18px;
+        min-height: 18px;
+        border-radius: 9px;
+        background: #ffffff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+        border: none;
+    }
+    .mac-media-icon {
+        min-width: 36px;
+        min-height: 36px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.08);
+        color: #0a84ff;
+        font-size: 17px;
+    }
+    .mac-media-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #ffffff;
+    }
+    .mac-media-artist {
+        font-size: 11px;
+        color: #94a3b8;
+    }
+    .mac-media-ctrl {
+        background: transparent;
+        border: none;
+        color: #cbd5e1;
+        font-size: 15px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        transition: all 120ms ease;
+    }
+    .mac-media-ctrl:hover {
+        background: rgba(255, 255, 255, 0.12);
+        color: #ffffff;
+    }
+    .mac-bat-label {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: #f1f5f9;
+    }
+    .mac-pill-btn {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        color: #cbd5e1;
+        font-size: 12.5px;
+        padding: 6px 12px;
+        transition: all 120ms ease;
+    }
+    .mac-pill-btn:hover {
+        background: rgba(255, 255, 255, 0.16);
+        color: #ffffff;
+        border-color: rgba(255, 255, 255, 0.18);
+    }
+    #lavender-panel combobox {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        color: #f1f5f9;
+        padding: 6px 10px;
+    }
+    #lavender-panel calendar {
+        background: rgba(30, 36, 48, 0.85);
+        color: #f1f5f9;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 8px;
+    }
+    #lavender-panel calendar:selected {
+        background: #0a84ff;
+        color: white;
+    }
+    '''
+else:
+    css_content = b'''
+    #lavender-panel {
+        background: rgba(246, 248, 252, 0.92);
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        border-radius: 18px;
+        color: #1e293b;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.14);
+    }
+    #lavender-panel * {
+        font-family: "Inter", "Symbols Nerd Font";
+        font-size: 13px;
+    }
+    .title {
+        font-size: 17px;
+        font-weight: 700;
+        color: #0f172a;
+        letter-spacing: -0.2px;
+    }
+    .mac-card {
+        background: rgba(255, 255, 255, 0.85);
+        border: 1px solid rgba(0, 0, 0, 0.06);
+        border-radius: 14px;
+        padding: 10px 12px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    }
+    .mac-toggle-btn {
+        background: rgba(255, 255, 255, 0.85);
+        border: 1px solid rgba(0, 0, 0, 0.06);
+        border-radius: 14px;
+        padding: 8px 10px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+        transition: all 120ms ease;
+    }
+    .mac-toggle-btn:hover {
+        background: rgba(255, 255, 255, 1.0);
+        border-color: rgba(0, 0, 0, 0.10);
+    }
+    .mac-toggle-btn:active {
+        background: rgba(240, 243, 248, 1.0);
+    }
+    .mac-icon-circle {
+        min-width: 34px;
+        min-height: 34px;
+        border-radius: 17px;
+        background: rgba(0, 0, 0, 0.06);
+        color: #64748b;
+        font-size: 15px;
+    }
+    .mac-icon-circle.active {
+        background: #007aff;
+        color: #ffffff;
+    }
+    .mac-icon-circle.active-amber {
+        background: #ff9500;
+        color: #ffffff;
+    }
+    .mac-icon-circle.active-purple {
+        background: #5856d6;
+        color: #ffffff;
+    }
+    .mac-toggle-title {
+        font-size: 12.5px;
+        font-weight: 700;
+        color: #0f172a;
+    }
+    .mac-toggle-sub {
+        font-size: 11px;
+        color: #64748b;
+    }
+    .mac-slider-title {
+        font-size: 12.5px;
+        font-weight: 700;
+        color: #0f172a;
+    }
+    .mac-slider-val {
+        font-size: 12px;
+        font-weight: 600;
+        color: #64748b;
+    }
+    .mac-icon-btn {
+        background: transparent;
+        border: none;
+        padding: 2px;
+        color: #64748b;
+    }
+    .mac-icon-btn:hover {
+        color: #0f172a;
+    }
+    scale.mac-scale {
+        min-height: 24px;
+        padding: 2px 0;
+    }
+    scale.mac-scale trough {
+        min-height: 18px;
+        border-radius: 9px;
+        background: rgba(0, 0, 0, 0.07);
+        border: none;
+    }
+    scale.mac-scale highlight {
+        min-height: 18px;
+        border-radius: 9px;
+        background: #007aff;
+        border: none;
+    }
+    scale.mac-scale slider {
+        min-width: 18px;
+        min-height: 18px;
+        border-radius: 9px;
+        background: #ffffff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        border: none;
+    }
+    .mac-media-icon {
+        min-width: 36px;
+        min-height: 36px;
+        border-radius: 18px;
+        background: rgba(0, 122, 255, 0.1);
+        color: #007aff;
+        font-size: 17px;
+    }
+    .mac-media-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #0f172a;
+    }
+    .mac-media-artist {
+        font-size: 11px;
+        color: #64748b;
+    }
+    .mac-media-ctrl {
+        background: transparent;
+        border: none;
+        color: #475569;
+        font-size: 15px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        transition: all 120ms ease;
+    }
+    .mac-media-ctrl:hover {
+        background: rgba(0, 0, 0, 0.06);
+        color: #0f172a;
+    }
+    .mac-bat-label {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: #0f172a;
+    }
+    .mac-pill-btn {
+        background: rgba(255, 255, 255, 0.90);
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 10px;
+        color: #334155;
+        font-size: 12.5px;
+        padding: 6px 12px;
+        transition: all 120ms ease;
+    }
+    .mac-pill-btn:hover {
+        background: #007aff;
+        color: #ffffff;
+        border-color: #007aff;
+    }
+    #lavender-panel combobox {
+        background: rgba(255, 255, 255, 0.90);
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: 10px;
+        color: #1e293b;
+        padding: 6px 10px;
+    }
+    #lavender-panel calendar {
+        background: #ffffff;
+        color: #1e293b;
+        border-radius: 12px;
+        border: 1px solid rgba(0, 0, 0, 0.1);
+        padding: 8px;
+    }
+    #lavender-panel calendar:selected {
+        background: #007aff;
+        color: white;
+    }
+    '''
+
+css = Gtk.CssProvider()
+css.load_from_data(css_content)
+Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+window = Panel()
+def sigterm_handler():
+    window.alive = False
+    window.destroy()
+    Gtk.main_quit()
+    return False
+
+if GLibUnix:
+    GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, sigterm_handler)
+else:
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, sigterm_handler)
+
+Gtk.main()

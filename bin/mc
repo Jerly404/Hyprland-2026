@@ -1,0 +1,2 @@
+#!/bin/sh
+exec prismlauncher --launch "26.3" "$@"

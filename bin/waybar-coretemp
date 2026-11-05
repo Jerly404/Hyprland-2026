@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+# Emit only a real CPU package temperature from the hwmon driver.
+for hwmon in /sys/class/hwmon/hwmon*; do
+  [[ -r "$hwmon/name" ]] || continue
+  [[ $(<"$hwmon/name") == coretemp ]] || continue
+  [[ -r "$hwmon/temp1_input" ]] || exit 0
+
+  raw=$(<"$hwmon/temp1_input")
+  [[ $raw =~ ^[0-9]+$ ]] || exit 0
+  temp=$((raw / 1000))
+
+  if (( temp >= 85 )); then
+    state=critical
+  elif (( temp >= 75 )); then
+    state=warning
+  else
+    state=normal
+  fi
+
+  printf '{"text":"󰔏 %d°C","tooltip":"CPU package: %d°C","class":"%s"}\n' "$temp" "$temp" "$state"
+  exit 0
+done
+
+# No compatible sensor: emit no number instead of inventing one.
+exit 0

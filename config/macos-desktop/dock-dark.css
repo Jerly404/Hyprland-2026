@@ -1,0 +1,57 @@
+#macos-dock {
+  background: rgba(18, 22, 31, 0.74);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  color: #e2e8f0;
+}
+
+#macos-dock button {
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+  padding: 0;
+  margin: 0;
+  box-shadow: none;
+  min-height: 0;
+  min-width: 0;
+  transition: background-color 150ms ease;
+}
+
+#macos-dock button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+#macos-dock button.active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+#macos-dock .indicator {
+  font: 8px "Inter";
+  color: transparent;
+  min-height: 5px;
+}
+
+#macos-dock button.running .indicator {
+  color: #94a3b8;
+}
+
+#macos-dock button.active .indicator {
+  color: #38bdf8;
+}
+
+#macos-dock separator {
+  background: rgba(255, 255, 255, 0.15);
+  min-width: 1px;
+}
+
+tooltip {
+  background: #181d28;
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+}
+
+tooltip label {
+  font: 11px "Inter";
+  padding: 4px 8px;
+}

@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG="$HOME/.config/waybar/lavender-sidebar.jsonc"
+STYLE="$HOME/.config/waybar/lavender-sidebar.css"
+
+json_status() {
+    local app="$1" regex icon label clients address class
+    case "$app" in
+        zen)      regex='zen|zen-browser'; icon='󰖟'; label='Zen Browser' ;;
+        kitty)    regex='^kitty$'; icon='󰆍'; label='Kitty' ;;
+        code)     regex='code|code-oss|vscode'; icon='󰨞'; label='Code - OSS' ;;
+        spotify)  regex='spotify'; icon='󰓇'; label='Spotify' ;;
+        discord)  regex='discord'; icon='󰙯'; label='Discord' ;;
+        dolphin)  regex='dolphin'; icon='󰉋'; label='Dolphin' ;;
+        obsidian) regex='obsidian'; icon='󰎚'; label='Obsidian' ;;
+        *) return 2 ;;
+    esac
+
+    clients="$(hyprctl -j clients 2>/dev/null || printf '[]')"
+    address="$(jq -r --arg re "$regex" '[.[] | select(((.class // "") | test($re; "i")) or ((.initialClass // "") | test($re; "i")))][0].address // empty' <<<"$clients" 2>/dev/null || true)"
+    class=closed
+    [[ -n "$address" ]] && class=running
+    jq -cn --arg text "$icon" --arg class "$class" --arg tooltip "$label — clic para abrir o enfocar" \
+        '{text:$text,class:$class,tooltip:$tooltip}'
+}
+
+launch_app() {
+    local app="$1" regex desktop address clients
+    case "$app" in
+        zen)      regex='zen|zen-browser'; desktop=zen ;;
+        kitty)    regex='^kitty$'; desktop=kitty ;;
+        code)     regex='code|code-oss|vscode'; desktop=code-oss ;;
+        spotify)  regex='spotify'; desktop=spotify ;;
+        discord)  regex='discord'; desktop=discord ;;
+        dolphin)  regex='dolphin'; desktop=org.kde.dolphin ;;
+        obsidian) regex='obsidian'; desktop=obsidian ;;
+        *) return 2 ;;
+    esac
+
+    clients="$(hyprctl -j clients 2>/dev/null || printf '[]')"
+    address="$(jq -r --arg re "$regex" '[.[] | select(((.class // "") | test($re; "i")) or ((.initialClass // "") | test($re; "i")))][0].address // empty' <<<"$clients" 2>/dev/null || true)"
+    if [[ -n "$address" ]]; then
+        hyprctl dispatch focuswindow "address:$address" >/dev/null
+    else
+        gtk-launch "$desktop" >/dev/null 2>&1 &
+    fi
+}
+
+launch_new() {
+    local app="$1" desktop
+    case "$app" in
+        zen)      desktop=zen ;;
+        kitty)    desktop=kitty ;;
+        code)     desktop=code-oss ;;
+        spotify)  desktop=spotify ;;
+        discord)  desktop=discord ;;
+        dolphin)  desktop=org.kde.dolphin ;;
+        obsidian) desktop=obsidian ;;
+        *) return 2 ;;
+    esac
+    gtk-launch "$desktop" >/dev/null 2>&1 &
+}
+
+
+media() {
+    local action="${1:-title}" operation="${2:-display}" state title icon
+    state="$(playerctl status 2>/dev/null || true)"
+    if [[ -z "$state" || "$state" == "Stopped" ]]; then
+        if [[ "$action" == title ]]; then
+            jq -cn '{text:"󰎆",class:"idle",tooltip:"Sin reproducción MPRIS activa"}'
+        else
+            jq -cn '{text:"",class:"hidden",tooltip:"Sin reproducción MPRIS activa"}'
+        fi
+        return 0
+    fi
+    title="$(playerctl metadata --format '{{title}} — {{artist}}' 2>/dev/null || true)"
+    title="${title//&/&amp;}"
+    title="${title//</&lt;}"
+    title="${title//>/&gt;}"
+    if [[ "$operation" == action ]]; then
+        case "$action" in
+            previous) playerctl previous >/dev/null 2>&1 || true ;;
+            toggle) playerctl play-pause >/dev/null 2>&1 || true ;;
+            next) playerctl next >/dev/null 2>&1 || true ;;
+        esac
+        state="$(playerctl status 2>/dev/null || true)"
+    fi
+    case "$action" in
+        title)
+            jq -cn --arg tooltip "$title" '{text:"󰎆",class:"playing",tooltip:$tooltip}'
+            ;;
+        previous)
+            jq -cn --arg tooltip "$title" '{text:"󰒮",class:"active",tooltip:("Anterior · " + $tooltip)}'
+            ;;
+        toggle)
+            if [[ "$state" == "Playing" ]]; then icon='󰏤'; else icon='󰐊'; fi
+            jq -cn --arg icon "$icon" --arg tooltip "$title" '{text:$icon,class:"active",tooltip:("Reproducir / pausar · " + $tooltip)}'
+            ;;
+        next)
+            jq -cn --arg tooltip "$title" '{text:"󰒭",class:"active",tooltip:("Siguiente · " + $tooltip)}'
+            ;;
+        *) return 2 ;;
+    esac
+}
+
+start_sidebar() {
+    rm -f "${XDG_RUNTIME_DIR:-/tmp}/lavender-hidden"
+    exec /usr/bin/python3 "$HOME/.local/lib/lavender-mocha/sidebar.py"
+}
+
+start_sidebar_bg() {
+    [ ! -e "${XDG_RUNTIME_DIR:-/tmp}/lavender-hidden" ] || return 0
+    pgrep -f '[s]idebar.py' >/dev/null && return 0
+    local log="$HOME/.local/state/lavender-mocha/sidebar-v3-launch.log"
+    mkdir -p "$(dirname "$log")"
+    nohup /usr/bin/python3 "$HOME/.local/lib/lavender-mocha/sidebar.py" </dev/null >>"$log" 2>&1 &
+}
+
+stop_sidebar() {
+    local pidfile="${XDG_RUNTIME_DIR:-/tmp}/lavender-v3.pid" pid cmdline
+    if [ -r "$pidfile" ]; then
+        pid="$(cat "$pidfile")"
+        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+        if [[ "$cmdline" == *"/lavender-mocha/sidebar.py"* ]]; then
+            kill -TERM "$pid" 2>/dev/null || true
+            for _ in {1..30}; do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.1
+            done
+        fi
+    fi
+    while read -r pid; do
+        [ -n "$pid" ] || continue
+        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+        if [[ "$cmdline" == *"$CONFIG"* || "$cmdline" == *"lavender-sidebar-${UID}.jsonc"* ]]; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done < <(pgrep -x waybar || true)
+}
+
+show_sidebar() {
+    local flag="${XDG_RUNTIME_DIR:-/tmp}/lavender-hidden"
+    rm -f "$flag"
+    start_sidebar_bg
+}
+
+hide_sidebar() {
+    local flag="${XDG_RUNTIME_DIR:-/tmp}/lavender-hidden"
+    if [ ! -f "$flag" ]; then
+        touch "$flag"
+        stop_sidebar
+    else
+        rm -f "$flag"
+        start_sidebar_bg
+    fi
+}
+
+toggle_sidebar() {
+    local flag="${XDG_RUNTIME_DIR:-/tmp}/lavender-hidden"
+    if [ -f "$flag" ]; then show_sidebar; else hide_sidebar; fi
+}
+
+case "${1:-}" in
+    start) start_sidebar ;;
+    stop) stop_sidebar ;;
+    restart) stop_sidebar; sleep 0.3; start_sidebar_bg ;;
+    toggle) toggle_sidebar ;;
+    show) show_sidebar ;;
+    hide) hide_sidebar ;;
+    status) json_status "${2:-}" ;;
+    launch) launch_app "${2:-}" ;;
+    launch-new) launch_new "${2:-}" ;;
+    media) media "${2:-title}" "${3:-display}" ;;
+    *) printf 'Uso: %s {start|stop|restart|toggle|show|hide|status APP|launch APP|launch-new APP|media ACCION}\n' "$0" >&2; exit 2 ;;
+esac

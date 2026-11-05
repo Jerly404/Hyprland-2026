@@ -1,0 +1,47 @@
+#!/usr/bin/python3
+"""Restore the pre-macOS desktop and retain the current files in another snapshot."""
+from pathlib import Path
+import datetime, json, os, shutil, subprocess
+H=Path.home(); root=H/'.local/state/macos-desktop'
+backup=Path((root/'latest-backup').read_text().strip())
+manifest=json.loads((backup/'manifest.json').read_text())
+for entry in manifest:
+    p=Path(entry['path'])
+    if p.is_absolute() or '..' in p.parts: raise SystemExit('Ruta de copia no válida.')
+    src=backup/'files'/p
+    if entry['exists'] and not (src.exists() or src.is_symlink()):
+        raise SystemExit('Falta un archivo de la copia: '+str(src))
+if '--check' in os.sys.argv:
+    print(f'Copia válida: {backup}\n{len(manifest)} rutas verificadas.'); raise SystemExit(0)
+recovery=root/'before-restore'/datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+recovery.mkdir(parents=True)
+subprocess.run(['systemctl','--user','stop','macos-bar.service','macos-dock.service'],check=True)
+# Restore minimized windows before disabling the dock that can bring them back.
+try:
+    minimized=json.loads((root/'minimized.json').read_text())
+    for address in list(minimized):
+        subprocess.run([str(H/'.local/bin/macos-desktop'),'focus',address])
+except (OSError,ValueError): pass
+flag=H/'.config/macos-desktop/enabled'
+if flag.exists(): flag.rename(recovery/'profile-enabled')
+for entry in manifest:
+    dst=H/entry['path']; src=backup/'files'/entry['path']; saved=recovery/'files'/entry['path']
+    if dst.exists() or dst.is_symlink():
+        saved.parent.mkdir(parents=True,exist_ok=True); shutil.move(str(dst),str(saved))
+    if entry['exists']:
+        dst.parent.mkdir(parents=True,exist_ok=True)
+        if src.is_symlink(): dst.symlink_to(src.readlink())
+        elif src.is_dir(): shutil.copytree(src,dst,symlinks=True)
+        else: shutil.copy2(src,dst)
+settings=json.loads((backup/'gsettings.json').read_text())
+for identifier,value in settings.items():
+    schema,key=identifier.split(' ',1)
+    subprocess.run(['gsettings','set',schema,key,value],check=True)
+subprocess.run(['fc-cache'],check=True)
+subprocess.run(['/usr/bin/hyprctl','reload'],check=True)
+subprocess.run(['dunstctl','reload'])
+subprocess.run(['pkill','-USR1','-x','kitty'])
+subprocess.run(['pkill','-HUP','-x','xsettingsd'])
+subprocess.run([str(H/'.local/bin/lavender-sidebar'),'restart'],check=True)
+subprocess.run([str(H/'.local/bin/wallpaper'),'--restore'],check=True)
+print('Configuración anterior restaurada. Estado previo a restaurar guardado en: '+str(recovery))

@@ -1,0 +1,5 @@
+#!/usr/bin/python3
+import os
+from pathlib import Path
+p=Path(os.environ['XDG_RUNTIME_DIR'])/'lavender-idle-active'
+p.write_text('0' if p.exists() and p.read_text()=='1' else '1')

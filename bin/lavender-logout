@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Lavender Mocha Power Menu Launcher for wlogout
+set -euo pipefail
+export FONTCONFIG_FILE="$HOME/.config/waybar/fonts.conf"
+
+# Toggle behavior: if already open, close it
+if pgrep -x "wlogout" > /dev/null; then
+    pkill -x "wlogout"
+    exit 0
+fi
+
+# Detect focused monitor geometry
+monitor_json=$(hyprctl monitors -j 2>/dev/null || echo "[]")
+focused_info=$(echo "$monitor_json" | jq -r '.[] | select(.focused == true)' 2>/dev/null || echo "")
+
+if [ -n "$focused_info" ]; then
+    width=$(echo "$focused_info" | jq -r '.width')
+    height=$(echo "$focused_info" | jq -r '.height')
+    scale=$(echo "$focused_info" | jq -r '.scale')
+else
+    width=1920
+    height=1080
+    scale=1.0
+fi
+
+# Fallback defaults if parsing failed
+width=${width:-1920}
+height=${height:-1080}
+scale=${scale:-1.0}
+[ "$(echo "$scale <= 0" | bc 2>/dev/null || echo 0)" -eq 1 ] && scale=1.0
+
+# Calculate proportional margins for optimal card geometry
+margin_v=$(awk -v h="$height" -v s="$scale" 'BEGIN { printf "%d", (h * 0.365) / s }')
+margin_h=$(awk -v w="$width" -v s="$scale" 'BEGIN { printf "%d", (w * 0.125) / s }')
+
+exec wlogout \
+    -b 6 \
+    -c 18 \
+    -r 18 \
+    -m 0 \
+    -T "$margin_v" \
+    -B "$margin_v" \
+    -L "$margin_h" \
+    -R "$margin_h" \
+    --protocol layer-shell

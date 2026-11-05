@@ -1,0 +1,52 @@
+#!/bin/sh
+
+# Reutiliza la ventana existente sin arrancar otro cliente ni reescribir prefs.
+spotify_running=0
+if pgrep -u "$(id -u)" -x spotify >/dev/null 2>&1; then
+    spotify_running=1
+    if [ "$#" -eq 0 ] && command -v gdbus >/dev/null 2>&1; then
+        if gdbus call --session --dest org.mpris.MediaPlayer2.spotify \
+            --object-path /org/mpris/MediaPlayer2 \
+            --method org.mpris.MediaPlayer2.Raise >/dev/null 2>&1; then
+            exit 0
+        fi
+    fi
+fi
+
+# Spotify puede reescribir prefs al cerrarse; aplica el limite antes de cada inicio.
+prefs="$HOME/.config/spotify/prefs"
+if [ "$spotify_running" -eq 0 ] && [ -f "$prefs" ]; then
+    if grep -q '^storage.size=' "$prefs"; then
+        sed -i 's/^storage\.size=.*/storage.size=1024/' "$prefs"
+    else
+        printf '\nstorage.size=1024\n' >> "$prefs"
+    fi
+fi
+
+spotify_bin="$HOME/.local/share/spotify-mocha/spotify"
+widevine_path="$HOME/.config/chromium/WidevineCdm/4.10.3050.0/_platform_specific/linux_x64/libwidevinecdm.so"
+
+# Los URI del lanzador se entregan como un unico argumento, incluso con espacios.
+case "${1:-}" in
+    spotify:*|https://open.spotify.com/*) set -- --uri "$1" ;;
+esac
+
+# CEF 146 falla al importar imagenes EGL entre Intel/NVIDIA. Wayland con
+# composicion por software evita la ventana negra y los reinicios de GPU.
+set -- --ozone-platform=wayland --disable-gpu \
+    --disable-accelerated-video-decode --force-prefers-reduced-motion \
+    --disk-cache-size=268435456 "$@"
+if [ -f "$widevine_path" ]; then
+    set -- "--widevine-cdm-path=$widevine_path" --widevine-cdm-version=4.10.3050.0 "$@"
+fi
+
+if [ "${SPOTIFY_ADBLOCK:-1}" = 1 ] && [ -r /usr/lib/spotify-adblock.so ]; then
+    # Evita registrar cada peticion de imagen, biblioteca y reproduccion.
+    export RUST_LOG="${RUST_LOG:-warn}"
+    case ":${LD_PRELOAD:-}:" in
+        *:/usr/lib/spotify-adblock.so:*) ;;
+        *) export LD_PRELOAD="/usr/lib/spotify-adblock.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+    esac
+fi
+
+exec "$spotify_bin" "$@"

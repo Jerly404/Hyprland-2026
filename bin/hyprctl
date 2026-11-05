@@ -1,0 +1,7 @@
+#!/bin/sh
+# Native read-only requests stay fast; translate old HyDE mutation syntax.
+case " $* " in
+  *" keyword "*|*" dispatch "*|*" --batch "*|*" reload "*|*" hyde:"*)
+    exec /usr/bin/python3 "$HOME/.local/lib/hypr-migration/compat.py" "$@" ;;
+  *) exec /usr/bin/hyprctl "$@" ;;
+esac

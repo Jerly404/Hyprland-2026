@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec python3 /home/jerly404/dev/wallpaper/main.py "$@"

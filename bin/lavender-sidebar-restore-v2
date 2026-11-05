@@ -1,0 +1,18 @@
+#!/usr/bin/python3
+"""Restore the exact pre-V3 sidebar without touching the secondary bar."""
+import os,signal,subprocess,time,shutil
+from pathlib import Path
+h=Path.home(); backup=Path('/home/jerly404/.local/state/lavender-mocha/backups/20261011T234327Z-before-v3'); r=Path(os.environ.get('XDG_RUNTIME_DIR','/tmp'))
+for file,needle in [('lavender-panel.pid',b'/lavender-panel'),('lavender-v3.pid',b'/lavender-mocha/sidebar.py')]:
+ path=r/file
+ if path.exists():
+  try:
+   pid=int(path.read_text().split()[0]); args=Path(f'/proc/{pid}/cmdline').read_bytes()
+   if needle in args: os.kill(pid,signal.SIGTERM)
+  except (OSError,ValueError): pass
+time.sleep(3)
+for rel in ['.config/waybar/lavender-sidebar.jsonc','.config/waybar/lavender-sidebar.css','.local/bin/lavender-sidebar']:
+ shutil.copy2(backup/rel,h/rel)
+log=(h/'.local/state/lavender-mocha/restore-v2.log').open('a')
+subprocess.Popen([str(h/'.local/bin/lavender-sidebar'),'start'],stdout=log,stderr=log,start_new_session=True)
+print('Configuración anterior restaurada. Los archivos V3 se conservan inactivos.')

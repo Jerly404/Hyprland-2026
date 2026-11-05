@@ -1,0 +1,12 @@
+# Nunca subir secretos ni datos personales.
+.env*
+*.key
+*.pem
+*.p12
+*.secret
+secrets/
+private/
+*.log
+*.cache*
+__pycache__/
+

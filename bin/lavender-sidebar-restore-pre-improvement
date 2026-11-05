@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -e
+BACKUP_DIR="/home/jerly404/.local/state/lavender-mocha/backups/20261011T191838-backup-actual"
+echo "Restaurando configuración guardada desde: $BACKUP_DIR"
+cp -r "$BACKUP_DIR/waybar/"* /home/jerly404/.config/waybar/
+cp -a "$BACKUP_DIR/local-bin/"* /home/jerly404/.local/bin/
+cp -r "$BACKUP_DIR/local-lib/"* /home/jerly404/.local/lib/
+/home/jerly404/.local/bin/lavender-sidebar-restart
+echo "Restauración completada y barra reiniciada."

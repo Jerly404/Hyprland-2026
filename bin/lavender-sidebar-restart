@@ -1,0 +1,13 @@
+#!/usr/bin/python3
+import os,signal,subprocess,time
+from pathlib import Path
+h=Path.home(); r=Path(os.environ.get('XDG_RUNTIME_DIR','/tmp')); p=r/'lavender-v3.pid'
+if p.exists():
+ pid=int(p.read_text()); path=Path(f'/proc/{pid}/cmdline')
+ if path.exists() and b'/lavender-mocha/sidebar.py' in path.read_bytes():
+  os.kill(pid,signal.SIGTERM)
+  for _ in range(70):
+   if not p.exists(): break
+   time.sleep(.1)
+log=(h/'.local/state/lavender-mocha/sidebar-v3-launch.log').open('a')
+subprocess.Popen([str(h/'.local/bin/lavender-sidebar'),'start'],stdout=log,stderr=log,start_new_session=True)

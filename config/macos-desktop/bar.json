@@ -1,0 +1,381 @@
+[
+  {
+    "name": "macos-dp2",
+    "layer": "top",
+    "position": "top",
+    "height": 36,
+    "spacing": 0,
+    "exclusive": true,
+    "reload_style_on_change": true,
+    "modules-left": [
+      "custom/menu",
+      "hyprland/window",
+      "custom/apps"
+    ],
+    "modules-center": [
+      "hyprland/workspaces"
+    ],
+    "modules-right": [
+      "mpris",
+      "tray",
+      "network",
+      "bluetooth",
+      "pulseaudio",
+      "battery",
+      "custom/theme",
+      "custom/search",
+      "custom/notifications",
+      "custom/control",
+      "clock"
+    ],
+    "custom/menu": {
+      "format": "\udb82\udcc7",
+      "tooltip-format": "Arch Linux \u00b7 Men\u00fa\nClic derecho: Opciones de sesi\u00f3n",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop menu",
+      "on-click-right": "/home/jerly404/.local/bin/lavender-logout"
+    },
+    "custom/apps": {
+      "format": "Aplicaciones",
+      "tooltip-format": "Buscar aplicaciones \u00b7 Super + Espacio",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop spotlight"
+    },
+    "hyprland/window": {
+      "format": "{class}",
+      "max-length": 32,
+      "separate-outputs": true,
+      "icon": false,
+      "rewrite": {
+        "": "Finder",
+        "kitty": "Terminal",
+        "google-chrome": "Chrome",
+        "brave-browser": "Brave",
+        "org.kde.dolphin": "Archivos",
+        "code-oss": "Code",
+        "Code": "Code",
+        "spotify": "Spotify",
+        "obsidian": "Obsidian",
+        "zen": "Zen"
+      },
+      "on-click": "/home/jerly404/.local/bin/macos-desktop windows"
+    },
+    "hyprland/workspaces": {
+      "format": "{name}",
+      "all-outputs": false,
+      "disable-scroll": false,
+      "on-click": "activate",
+      "sort-by-number": true,
+      "persistent-workspaces": {
+        "desc:GIGA-BYTE TECHNOLOGY CO. LTD. GS27QA 0x01010101": [
+          1,
+          2,
+          3
+        ],
+        "DP-1": [
+          1,
+          2,
+          3
+        ],
+        "DP-2": [
+          1,
+          2,
+          3
+        ],
+        "eDP-2": [
+          4,
+          5,
+          6
+        ]
+      }
+    },
+    "mpris": {
+      "format": "{player_icon}",
+      "format-paused": "{player_icon}",
+      "player-icons": {
+        "default": "\udb80\udf86",
+        "spotify": "\uf1bc"
+      },
+      "tooltip-format": "{title}\n{artist}",
+      "on-click": "playerctl play-pause",
+      "on-click-right": "/home/jerly404/.local/bin/lavender-panel media",
+      "on-scroll-up": "playerctl next",
+      "on-scroll-down": "playerctl previous"
+    },
+    "tray": {
+      "icon-size": 15,
+      "spacing": 8,
+      "icons": {
+        "udiskie": "drive-removable-media-usb"
+      }
+    },
+    "network": {
+      "format-wifi": "\udb81\udda9",
+      "format-ethernet": "\udb80\ude00",
+      "format-disconnected": "\udb81\uddaa",
+      "tooltip-format-wifi": "{essid} \u00b7 {signalStrength}%\n{ipaddr}",
+      "tooltip-format-ethernet": "Ethernet \u00b7 {ipaddr}",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel connectivity DP-2",
+      "on-click-right": "nm-connection-editor"
+    },
+    "bluetooth": {
+      "format": "\uf294",
+      "format-connected": "\uf294",
+      "format-disabled": "",
+      "tooltip-format": "Bluetooth \u00b7 {status}",
+      "tooltip-format-connected": "{device_alias}",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel connectivity DP-2",
+      "on-click-right": "blueman-manager"
+    },
+    "pulseaudio": {
+      "format": "{icon}",
+      "format-muted": "\udb81\udf5f",
+      "format-icons": {
+        "default": [
+          "\udb81\udd7f",
+          "\udb81\udd80",
+          "\udb81\udd7e"
+        ]
+      },
+      "tooltip-format": "Volumen {volume}% \u00b7 {desc}\nClic derecho: Silenciar\nClic central: Mezclador",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel audio DP-2",
+      "on-click-right": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
+      "on-click-middle": "pavucontrol -t 1",
+      "scroll-step": 3
+    },
+    "battery": {
+      "format": "{icon} {capacity}%",
+      "format-charging": "\udb80\udc84 {capacity}%",
+      "format-plugged": "\udb80\udc84 {capacity}%",
+      "format-icons": [
+        "\udb80\udc7a",
+        "\udb80\udc7c",
+        "\udb80\udc7e",
+        "\udb80\udc80",
+        "\udb80\udc79"
+      ],
+      "states": {
+        "warning": 25,
+        "critical": 12
+      },
+      "tooltip-format": "{timeTo} \u00b7 {power:.1f} W\nClic derecho: Sesi\u00f3n y energ\u00eda",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel power DP-2",
+      "on-click-right": "/home/jerly404/.local/bin/lavender-logout"
+    },
+    "custom/theme": {
+      "format": "\udb81\udd0e",
+      "tooltip-format": "Alternar modo claro / oscuro",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop toggle-theme"
+    },
+    "custom/search": {
+      "format": "\uf002",
+      "tooltip-format": "Spotlight \u00b7 Super + Espacio",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop spotlight"
+    },
+    "custom/notifications": {
+      "format": "\udb80\udc9a",
+      "tooltip-format": "Notificaciones \u00b7 Clic derecho: No molestar\nClic central: Descartar todas",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop notifications",
+      "on-click-right": "/home/jerly404/.local/bin/macos-desktop dnd",
+      "on-click-middle": "dunstctl close-all"
+    },
+    "custom/control": {
+      "format": "\udb84\udd04",
+      "tooltip-format": "Centro de control",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel system DP-2"
+    },
+    "clock": {
+      "format": "{:%a %d %b  %H:%M}",
+      "tooltip": false,
+      "on-click": "/home/jerly404/.local/bin/lavender-panel calendar DP-2"
+    },
+    "output": "DP-2"
+  },
+  {
+    "name": "macos-edp2",
+    "layer": "top",
+    "position": "top",
+    "height": 36,
+    "spacing": 0,
+    "exclusive": true,
+    "reload_style_on_change": true,
+    "modules-left": [
+      "custom/menu",
+      "hyprland/window",
+      "custom/apps"
+    ],
+    "modules-center": [
+      "hyprland/workspaces"
+    ],
+    "modules-right": [
+      "mpris",
+      "network",
+      "bluetooth",
+      "pulseaudio",
+      "battery",
+      "custom/theme",
+      "custom/search",
+      "custom/notifications",
+      "custom/control",
+      "clock"
+    ],
+    "custom/menu": {
+      "format": "\udb82\udcc7",
+      "tooltip-format": "Arch Linux \u00b7 Men\u00fa\nClic derecho: Opciones de sesi\u00f3n",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop menu",
+      "on-click-right": "/home/jerly404/.local/bin/lavender-logout"
+    },
+    "custom/apps": {
+      "format": "Aplicaciones",
+      "tooltip-format": "Buscar aplicaciones \u00b7 Super + Espacio",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop spotlight"
+    },
+    "hyprland/window": {
+      "format": "{class}",
+      "max-length": 32,
+      "separate-outputs": true,
+      "icon": false,
+      "rewrite": {
+        "": "Finder",
+        "kitty": "Terminal",
+        "google-chrome": "Chrome",
+        "brave-browser": "Brave",
+        "org.kde.dolphin": "Archivos",
+        "code-oss": "Code",
+        "Code": "Code",
+        "spotify": "Spotify",
+        "obsidian": "Obsidian",
+        "zen": "Zen"
+      },
+      "on-click": "/home/jerly404/.local/bin/macos-desktop windows"
+    },
+    "hyprland/workspaces": {
+      "format": "{name}",
+      "all-outputs": false,
+      "disable-scroll": false,
+      "on-click": "activate",
+      "sort-by-number": true,
+      "persistent-workspaces": {
+        "desc:GIGA-BYTE TECHNOLOGY CO. LTD. GS27QA 0x01010101": [
+          1,
+          2,
+          3
+        ],
+        "DP-1": [
+          1,
+          2,
+          3
+        ],
+        "DP-2": [
+          1,
+          2,
+          3
+        ],
+        "eDP-2": [
+          4,
+          5,
+          6
+        ]
+      }
+    },
+    "mpris": {
+      "format": "{player_icon}",
+      "format-paused": "{player_icon}",
+      "player-icons": {
+        "default": "\udb80\udf86",
+        "spotify": "\uf1bc"
+      },
+      "tooltip-format": "{title}\n{artist}",
+      "on-click": "playerctl play-pause",
+      "on-click-right": "/home/jerly404/.local/bin/lavender-panel media",
+      "on-scroll-up": "playerctl next",
+      "on-scroll-down": "playerctl previous"
+    },
+    "tray": {
+      "icon-size": 15,
+      "spacing": 8,
+      "icons": {
+        "udiskie": "drive-removable-media-usb"
+      }
+    },
+    "network": {
+      "format-wifi": "\udb81\udda9",
+      "format-ethernet": "\udb80\ude00",
+      "format-disconnected": "\udb81\uddaa",
+      "tooltip-format-wifi": "{essid} \u00b7 {signalStrength}%\n{ipaddr}",
+      "tooltip-format-ethernet": "Ethernet \u00b7 {ipaddr}",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel connectivity eDP-2",
+      "on-click-right": "nm-connection-editor"
+    },
+    "bluetooth": {
+      "format": "\uf294",
+      "format-connected": "\uf294",
+      "format-disabled": "",
+      "tooltip-format": "Bluetooth \u00b7 {status}",
+      "tooltip-format-connected": "{device_alias}",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel connectivity eDP-2",
+      "on-click-right": "blueman-manager"
+    },
+    "pulseaudio": {
+      "format": "{icon}",
+      "format-muted": "\udb81\udf5f",
+      "format-icons": {
+        "default": [
+          "\udb81\udd7f",
+          "\udb81\udd80",
+          "\udb81\udd7e"
+        ]
+      },
+      "tooltip-format": "Volumen {volume}% \u00b7 {desc}\nClic derecho: Silenciar\nClic central: Mezclador",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel audio eDP-2",
+      "on-click-right": "pactl set-sink-mute @DEFAULT_SINK@ toggle",
+      "on-click-middle": "pavucontrol -t 1",
+      "scroll-step": 3
+    },
+    "battery": {
+      "format": "{icon} {capacity}%",
+      "format-charging": "\udb80\udc84 {capacity}%",
+      "format-plugged": "\udb80\udc84 {capacity}%",
+      "format-icons": [
+        "\udb80\udc7a",
+        "\udb80\udc7c",
+        "\udb80\udc7e",
+        "\udb80\udc80",
+        "\udb80\udc79"
+      ],
+      "states": {
+        "warning": 25,
+        "critical": 12
+      },
+      "tooltip-format": "{timeTo} \u00b7 {power:.1f} W\nClic derecho: Sesi\u00f3n y energ\u00eda",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel power eDP-2",
+      "on-click-right": "/home/jerly404/.local/bin/lavender-logout"
+    },
+    "custom/theme": {
+      "format": "\udb81\udd0e",
+      "tooltip-format": "Alternar modo claro / oscuro",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop toggle-theme"
+    },
+    "custom/search": {
+      "format": "\uf002",
+      "tooltip-format": "Spotlight \u00b7 Super + Espacio",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop spotlight"
+    },
+    "custom/notifications": {
+      "format": "\udb80\udc9a",
+      "tooltip-format": "Notificaciones \u00b7 Clic derecho: No molestar\nClic central: Descartar todas",
+      "on-click": "/home/jerly404/.local/bin/macos-desktop notifications",
+      "on-click-right": "/home/jerly404/.local/bin/macos-desktop dnd",
+      "on-click-middle": "dunstctl close-all"
+    },
+    "custom/control": {
+      "format": "\udb84\udd04",
+      "tooltip-format": "Centro de control",
+      "on-click": "/home/jerly404/.local/bin/lavender-panel system eDP-2"
+    },
+    "clock": {
+      "format": "{:%a %d %b  %H:%M}",
+      "tooltip": false,
+      "on-click": "/home/jerly404/.local/bin/lavender-panel calendar eDP-2"
+    },
+    "output": "eDP-2"
+  }
+]

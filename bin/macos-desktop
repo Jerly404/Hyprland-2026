@@ -1,0 +1,196 @@
+#!/usr/bin/python3
+"""Actions shared by the bar, dock, keybindings and session startup."""
+import configparser, json, os, re, subprocess, sys, threading
+from pathlib import Path
+H = Path.home()
+THEME = str(H/'.config/rofi/macos.rasi')
+
+def run(args, **kw):
+    return subprocess.run(args, **kw)
+
+def hypr(*args):
+    return run([str(H/'.local/bin/hyprctl'), *args], capture_output=True, text=True)
+
+def query(name):
+    try:
+        return json.loads(hypr('-j', name).stdout)
+    except ValueError:
+        return {} if name == 'activewindow' else []
+
+def spawn(args):
+    return subprocess.Popen(args, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def toggle_rofi():
+    """Close rofi immediately if already running, providing instant toggle behavior."""
+    return subprocess.run(['pkill', '-x', 'rofi'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+def menu(title, items):
+    if toggle_rofi():
+        return ''
+    p = run(['rofi', '-dmenu', '-i', '-p', title, '-theme', THEME], input='\n'.join(items), capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else ''
+
+state = H/'.local/state/macos-desktop/minimized.json'
+
+def read_state():
+    try:
+        return json.loads(state.read_text())
+    except (OSError, ValueError):
+        return {}
+
+def focus(address):
+    if not re.fullmatch(r'0x[0-9a-fA-F]+', address):
+        return
+    cache = read_state()
+    if address in cache:
+        hypr('dispatch', 'movetoworkspacesilent', str(cache.pop(address)) + ',address:' + address)
+        state.write_text(json.dumps(cache))
+    hypr('dispatch', 'focuswindow', 'address:' + address)
+
+def set_theme(mode):
+    mode = 'light' if mode == 'light' else 'dark'
+    cfg = H/'.config/macos-desktop'
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg/'theme-mode').write_text(mode)
+
+    bar_src = cfg/(f'bar-{mode}.css')
+    dock_src = cfg/(f'dock-{mode}.css')
+    if bar_src.exists():
+        (cfg/'bar.css').write_text(bar_src.read_text())
+    if dock_src.exists():
+        (cfg/'dock.css').write_text(dock_src.read_text())
+
+    dunst_dir = H/'.config/dunst/dunstrc.d'
+    dunst_src = dunst_dir/(f'macos-{mode}.conf')
+    if dunst_src.exists():
+        (dunst_dir/'zz-macos.conf').write_text(dunst_src.read_text())
+        spawn(['dunstctl', 'reload'])
+
+    # Update toolkit preferences and reload Hyprland asynchronously so UI does not freeze
+    def async_sync():
+        color_scheme = 'prefer-dark' if mode == 'dark' else 'prefer-light'
+        for key, value in {'color-scheme': color_scheme, 'gtk-theme': 'MacOS',
+                           'icon-theme': 'Tela-circle-dracula', 'cursor-theme': 'Bibata-Modern-Ice'}.items():
+            run(['gsettings', 'set', 'org.gnome.desktop.interface', key, value], check=False)
+
+        for version in ('gtk-3.0', 'gtk-4.0'):
+            path = H/'.config'/version/'settings.ini'
+            settings = configparser.ConfigParser(interpolation=None)
+            settings.read(path)
+            if not settings.has_section('Settings'):
+                settings.add_section('Settings')
+            settings['Settings'].update({
+                'gtk-application-prefer-dark-theme': str(mode == 'dark').lower(),
+                'gtk-theme-name': 'MacOS', 'gtk-icon-theme-name': 'Tela-circle-dracula',
+                'gtk-cursor-theme-name': 'Bibata-Modern-Ice',
+            })
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open('w') as stream:
+                settings.write(stream, space_around_delimiters=False)
+        path = H/'.config/Kvantum/kvantum.kvconfig'
+        settings = configparser.ConfigParser(interpolation=None)
+        settings.read(path)
+        if not settings.has_section('General'):
+            settings.add_section('General')
+        settings['General']['theme'] = 'WhiteSurDark' if mode == 'dark' else 'WhiteSur'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('w') as stream:
+            settings.write(stream, space_around_delimiters=False)
+
+        run(['/usr/bin/hyprctl', 'reload'], check=False, capture_output=True, text=True)
+
+    threading.Thread(target=async_sync, daemon=False).start()
+
+    label = 'Modo Oscuro' if mode == 'dark' else 'Modo Claro'
+    spawn(['notify-send', '-i', 'preferences-desktop-theme', 'Apariencia del sistema', f'Se ha activado el {label}'])
+
+def toggle_theme():
+    mode_file = H/'.config/macos-desktop/theme-mode'
+    current = mode_file.read_text().strip() if mode_file.exists() else 'dark'
+    set_theme('light' if current == 'dark' else 'dark')
+
+action = sys.argv[1] if len(sys.argv) > 1 else 'control'
+
+if action == 'start':
+    run(['systemctl', '--user', 'import-environment', 'WAYLAND_DISPLAY', 'DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE', 'XDG_CURRENT_DESKTOP', 'PATH'])
+    run(['systemctl', '--user', 'start', 'macos-bar.service'], check=True)
+elif action == 'restart':
+    run(['systemctl', '--user', 'restart', 'macos-bar.service'], check=True)
+elif action == 'spotlight':
+    if not toggle_rofi():
+        spawn(['rofi', '-show', 'drun', '-theme', THEME])
+elif action == 'windows':
+    if toggle_rofi():
+        sys.exit(0)
+    clients = query('clients')
+    items = [f"{i+1:02}  {c.get('class','App')}  ·  {c.get('title','Ventana').replace(chr(10),' ')}" for i, c in enumerate(clients)]
+    answer = menu('Ventanas', items)
+    if answer in items:
+        focus(clients[items.index(answer)]['address'])
+elif action == 'focus' and len(sys.argv) > 2:
+    focus(sys.argv[2])
+elif action == 'minimize':
+    c = query('activewindow')
+    if c.get('address'):
+        cache = read_state()
+        cache[c['address']] = c['workspace']['name']
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps(cache))
+        hypr('dispatch', 'movetoworkspacesilent', 'special:macmin-' + c['address'][2:] + ',address:' + c['address'])
+elif action == 'maximize':
+    hypr('dispatch', 'fullscreen', '1')
+elif action == 'close' and len(sys.argv) > 2:
+    if re.fullmatch(r'0x[0-9a-fA-F]+', sys.argv[2]):
+        address = json.dumps('address:' + sys.argv[2])
+        hypr('eval', 'local w=hl.get_window(' + address + '); if w then hl.dispatch(hl.dsp.window.close({window=w})) end')
+elif action == 'toggle-theme':
+    toggle_theme()
+elif action == 'theme' and len(sys.argv) > 2:
+    set_theme(sys.argv[2])
+elif action == 'lock':
+    if run(['pgrep', '-x', 'hyprlock'], stdout=subprocess.DEVNULL).returncode:
+        spawn(['hyprlock'])
+elif action == 'downloads':
+    p = run(['xdg-user-dir', 'DOWNLOAD'], capture_output=True, text=True)
+    spawn(['dolphin', p.stdout.strip() or str(H/'Downloads')])
+elif action in ('capture-screen', 'capture-region'):
+    spawn(['hyde-shell', 'screenshot', 'm' if action == 'capture-screen' else 's'])
+elif action == 'notifications':
+    run(['dunstctl', 'history-pop'])
+elif action == 'dnd':
+    p = run(['dunstctl', 'is-paused'], capture_output=True, text=True)
+    is_paused = p.stdout.strip() == 'true'
+    run(['dunstctl', 'set-paused', 'false' if is_paused else 'true'])
+    msg = 'No molestar desactivado' if is_paused else 'No molestar activado'
+    icon = 'notification-network-wireless-disconnected' if is_paused else 'notification-network-wireless-full'
+    spawn(['notify-send', '-i', 'preferences-system-notifications', 'Notificaciones', msg])
+elif action == 'menu':
+    options = ['Acerca de este equipo', 'Alternar modo oscuro / claro', 'Centro de control', 'Aplicaciones', 'Bloquear pantalla', 'Opciones de sesión']
+    answer = menu('Escritorio', options)
+    if answer == 'Acerca de este equipo':
+        spawn(['kitty', '--title', 'Acerca de este equipo', '--hold', 'fastfetch'])
+    elif answer == 'Alternar modo oscuro / claro':
+        toggle_theme()
+    elif answer == 'Centro de control':
+        spawn([sys.argv[0], 'control'])
+    elif answer == 'Aplicaciones':
+        spawn([sys.argv[0], 'spotlight'])
+    elif answer == 'Bloquear pantalla':
+        spawn([sys.argv[0], 'lock'])
+    elif answer == 'Opciones de sesión':
+        spawn([str(H/'.local/bin/lavender-logout')])
+elif action == 'control':
+    mon = sys.argv[2] if len(sys.argv) > 2 else ''
+    if not mon:
+        try:
+            cursor = query('cursorpos')
+            monitors = query('monitors')
+            main = next((m for m in monitors if m['x'] <= cursor['x'] < m['x'] + m['width']/m['scale'] and m['y'] <= cursor['y'] < m['y'] + m['height']/m['scale']), monitors[0]) if monitors else {'name': 'DP-2'}
+            mon = main.get('name', 'DP-2')
+        except Exception:
+            mon = 'DP-2'
+    spawn([str(H/'.local/bin/lavender-panel'), 'system', mon])
+elif action == 'help':
+    spawn(['xdg-open', str(H/'.config/macos-desktop/LEEME.md')])
+else:
+    raise SystemExit('Acción no válida: ' + action)

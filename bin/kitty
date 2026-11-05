@@ -1,0 +1,5 @@
+#!/bin/sh
+# Work around NVIDIA framebuffer failures in Kitty; use Mesa for its renderer.
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+export __GLX_VENDOR_LIBRARY_NAME=mesa
+exec /usr/bin/kitty "$@"

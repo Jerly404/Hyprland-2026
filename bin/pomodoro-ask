@@ -1,0 +1,15 @@
+#!/bin/bash
+
+echo "🍅 POMODORO - Ingresa tiempos"
+echo "==========================="
+echo ""
+read -p "Minutos de trabajo [25]: " work
+read -p "Minutos de descanso [5]: " break
+
+work=${work:-25}
+break=${break:-5}
+
+~/.local/bin/pomodoro start "$work" "$break"
+echo ""
+echo "Iniciado: ${work}min trabajo, ${break}min descanso"
+echo "Usa 'pom-status' para ver el timer"

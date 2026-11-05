@@ -1,0 +1,10 @@
+#!/usr/bin/python3
+import json,subprocess,sys
+from pathlib import Path
+p=Path.home()/'.config/waybar/lavender-location.json'; conf=json.loads(p.read_text())
+if sys.argv[-1]=='toggle': conf['show']=not conf['show']
+else:
+ r=subprocess.run(['rofi','-dmenu','-p','Ciudad (vacío: ubicación por IP)'],input=conf['city']+'\n',text=True,capture_output=True)
+ if r.returncode: raise SystemExit()
+ conf['city']=r.stdout.strip()
+p.write_text(json.dumps(conf,ensure_ascii=False)+'\n')

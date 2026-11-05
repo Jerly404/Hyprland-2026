@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""
+Mouse Macro / Autoclicker for Hyprland / Wayland / Linux.
+Simulates burst clicks (e.g., 5 or 10 clicks) per physical click or via hotkey.
+"""
+
+import sys
+import os
+import time
+import json
+import signal
+import select
+import subprocess
+from pathlib import Path
+
+# Paths
+CONFIG_DIR = Path.home() / ".config" / "mouse-macro"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+PID_FILE = Path("/run/user") / str(os.getuid()) / "mouse-macro.pid"
+
+DEFAULT_CONFIG = {
+    "enabled": False,
+    "clicks": 5,
+    "delay_ms": 15,
+    "sound": True,
+    "notify": True
+}
+
+def load_config():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG.copy()
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            cfg = json.load(f)
+            for k, v in DEFAULT_CONFIG.items():
+                if k not in cfg:
+                    cfg[k] = v
+            return cfg
+    except Exception:
+        return DEFAULT_CONFIG.copy()
+
+def save_config(cfg):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+def notify(title, message, urgency="normal"):
+    cfg = load_config()
+    if cfg.get("notify", True):
+        subprocess.run(
+            ["notify-send", "-a", "Mouse Macro", "-u", urgency, "-i", "input-mouse", title, message],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    if cfg.get("sound", True):
+        subprocess.run(
+            ["canberra-gtk-play", "-i", "bell"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+def get_daemon_pid():
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text().strip())
+            os.kill(pid, 0)
+            return pid
+        except (ValueError, OSError):
+            PID_FILE.unlink(missing_ok=True)
+    return None
+
+def emit_clicks(count=5, delay_ms=15):
+    """Emit N left clicks using uinput."""
+    import evdev
+    from evdev import UInput, ecodes as e
+
+    cap = { e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE] }
+    delay_s = max(0.005, delay_ms / 1000.0)
+
+    with UInput(cap, name="virtual-macro-mouse") as ui:
+        time.sleep(0.01)
+        for _ in range(count):
+            ui.write(e.EV_KEY, e.BTN_LEFT, 1)
+            ui.syn()
+            time.sleep(delay_s)
+            ui.write(e.EV_KEY, e.BTN_LEFT, 0)
+            ui.syn()
+            time.sleep(delay_s)
+
+def cmd_burst(args):
+    cfg = load_config()
+    count = int(args[0]) if args else cfg.get("clicks", 5)
+    delay_ms = cfg.get("delay_ms", 15)
+    emit_clicks(count, delay_ms)
+
+def cmd_set_clicks(args):
+    if not args:
+        print("Uso: mouse-macro set-clicks <5|10|N>")
+        sys.exit(1)
+    try:
+        count = int(args[0])
+        if count < 1:
+            raise ValueError()
+    except ValueError:
+        print("Error: El número de clicks debe ser un entero positivo.")
+        sys.exit(1)
+
+    cfg = load_config()
+    cfg["clicks"] = count
+    save_config(cfg)
+    print(f"Clicks configurados a: {count}")
+    notify("🖱️ Macro Click", f"Ráfaga configurada a {count} clicks")
+
+    pid = get_daemon_pid()
+    if pid:
+        os.kill(pid, signal.SIGHUP)
+
+def cmd_set_delay(args):
+    if not args:
+        print("Uso: mouse-macro set-delay <milisegundos>")
+        sys.exit(1)
+    try:
+        ms = int(args[0])
+        if ms < 2:
+            raise ValueError()
+    except ValueError:
+        print("Error: El delay debe ser al menos 2 ms.")
+        sys.exit(1)
+
+    cfg = load_config()
+    cfg["delay_ms"] = ms
+    save_config(cfg)
+    print(f"Delay configurado a: {ms} ms")
+    notify("🖱️ Macro Click", f"Velocidad: {ms}ms entre clics")
+
+    pid = get_daemon_pid()
+    if pid:
+        os.kill(pid, signal.SIGHUP)
+
+def cmd_toggle():
+    cfg = load_config()
+    new_state = not cfg.get("enabled", False)
+    cfg["enabled"] = new_state
+    save_config(cfg)
+
+    pid = get_daemon_pid()
+    if pid:
+        os.kill(pid, signal.SIGUSR1)
+    elif new_state:
+        start_daemon_background()
+
+    status_text = "ACTIVADO" if new_state else "DESACTIVADO"
+    clicks = cfg.get("clicks", 5)
+    detail = f"Ráfaga de {clicks} clicks por click" if new_state else "Click normal restaurado"
+    print(f"Macro Click: {status_text} ({clicks} clicks)")
+    notify(f"🖱️ Macro Click: {status_text}", detail)
+
+def cmd_cycle():
+    """Cycles: OFF -> 5 clicks -> 10 clicks -> OFF"""
+    cfg = load_config()
+    enabled = cfg.get("enabled", False)
+    clicks = cfg.get("clicks", 5)
+
+    if not enabled:
+        cfg["enabled"] = True
+        cfg["clicks"] = 5
+        title = "🖱️ Macro Click: ACTIVADO"
+        detail = "Modo 5 clicks por click"
+    elif clicks == 5:
+        cfg["enabled"] = True
+        cfg["clicks"] = 10
+        title = "🖱️ Macro Click: MODO 10X"
+        detail = "Modo 10 clicks por click"
+    else:
+        cfg["enabled"] = False
+        title = "🖱️ Macro Click: DESACTIVADO"
+        detail = "Click normal restaurado"
+
+    save_config(cfg)
+    pid = get_daemon_pid()
+    if pid:
+        os.kill(pid, signal.SIGUSR1)
+    elif cfg["enabled"]:
+        start_daemon_background()
+
+    print(f"{title} - {detail}")
+    notify(title, detail)
+
+def cmd_on():
+    cfg = load_config()
+    if not cfg.get("enabled", False):
+        cmd_toggle()
+    else:
+        print("Macro Click ya está activado.")
+
+def cmd_off():
+    cfg = load_config()
+    if cfg.get("enabled", False):
+        cmd_toggle()
+    else:
+        print("Macro Click ya está desactivado.")
+
+def cmd_status():
+    cfg = load_config()
+    pid = get_daemon_pid()
+    print("========================================")
+    print("         MOUSE MACRO STATUS             ")
+    print("========================================")
+    print(f" Estado:             {'ACTIVADO' if cfg.get('enabled') else 'DESACTIVADO'}")
+    print(f" Clicks por disparo: {cfg.get('clicks', 5)}")
+    print(f" Delay entre clics:  {cfg.get('delay_ms', 15)} ms")
+    print(f" Notificaciones:     {'Sí' if cfg.get('notify') else 'No'}")
+    print(f" Daemon en background: {'Corriendo (PID ' + str(pid) + ')' if pid else 'Detenido'}")
+    print("========================================")
+
+def run_daemon():
+    """Background listener that monitors physical mouse clicks and triggers burst."""
+    import evdev
+    from evdev import UInput, ecodes as e
+
+    PID_FILE.write_text(str(os.getpid()))
+
+    cfg = load_config()
+    state = {
+        "enabled": cfg.get("enabled", False),
+        "clicks": cfg.get("clicks", 5),
+        "delay_ms": cfg.get("delay_ms", 15)
+    }
+
+    def handle_sigusr1(signum, frame):
+        c = load_config()
+        state["enabled"] = c.get("enabled", False)
+        state["clicks"] = c.get("clicks", 5)
+        state["delay_ms"] = c.get("delay_ms", 15)
+
+    def handle_sighup(signum, frame):
+        c = load_config()
+        state["clicks"] = c.get("clicks", 5)
+        state["delay_ms"] = c.get("delay_ms", 15)
+
+    def handle_term(signum, frame):
+        PID_FILE.unlink(missing_ok=True)
+        sys.exit(0)
+
+    signal.signal(signal.SIGUSR1, handle_sigusr1)
+    signal.signal(signal.SIGHUP, handle_sighup)
+    signal.signal(signal.SIGTERM, handle_term)
+    signal.signal(signal.SIGINT, handle_term)
+
+    # Find accessible physical mouse devices
+    accessible_devices = []
+    for p in evdev.list_devices():
+        try:
+            dev = evdev.InputDevice(p)
+            if "virtual-macro" in dev.name.lower():
+                continue
+            caps = dev.capabilities().get(e.EV_KEY, [])
+            if e.BTN_LEFT in caps:
+                accessible_devices.append(dev)
+        except (PermissionError, OSError):
+            continue
+
+    if not accessible_devices:
+        sys.stderr.write("ADVERTENCIA: No se pudo acceder a dispositivos en /dev/input/event*.\n")
+        sys.stderr.write("Ejecuta: sudo usermod -aG input $USER para habilitar el detector físico.\n")
+        PID_FILE.unlink(missing_ok=True)
+        sys.exit(1)
+
+    cap = { e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE] }
+    with UInput(cap, name="virtual-macro-mouse") as ui:
+        time.sleep(0.02)
+        dev_map = {dev.fd: dev for dev in accessible_devices}
+        last_burst_time = 0.0
+
+        while True:
+            r, _, _ = select.select(dev_map.keys(), [], [], 1.0)
+            if not r:
+                continue
+
+            for fd in r:
+                dev = dev_map[fd]
+                try:
+                    for event in dev.read():
+                        if event.type == e.EV_KEY and event.code == e.BTN_LEFT:
+                            now = time.time()
+                            if state["enabled"] and event.value == 1:
+                                min_gap = (state["clicks"] * state["delay_ms"] * 2) / 1000.0 + 0.04
+                                if now - last_burst_time >= min_gap:
+                                    last_burst_time = now
+                                    remaining = max(1, state["clicks"] - 1)
+                                    delay_s = max(0.005, state["delay_ms"] / 1000.0)
+                                    for _ in range(remaining):
+                                        time.sleep(delay_s)
+                                        ui.write(e.EV_KEY, e.BTN_LEFT, 1)
+                                        ui.syn()
+                                        time.sleep(delay_s)
+                                        ui.write(e.EV_KEY, e.BTN_LEFT, 0)
+                                        ui.syn()
+                except OSError:
+                    pass
+
+def start_daemon_background():
+    pid = get_daemon_pid()
+    if pid:
+        return
+    script_path = os.path.realpath(__file__)
+    subprocess.Popen(
+        [sys.executable, script_path, "daemon"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True
+    )
+
+def cmd_stop():
+    pid = get_daemon_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"Daemon detenido (PID {pid}).")
+        except OSError:
+            pass
+        PID_FILE.unlink(missing_ok=True)
+    else:
+        print("El daemon no está corriendo.")
+
+def main():
+    if len(sys.argv) < 2:
+        print("Uso: mouse-macro [cycle|toggle|on|off|status|burst|set-clicks|set-delay|start|stop|daemon]")
+        sys.exit(0)
+
+    cmd = sys.argv[1].lower()
+    args = sys.argv[2:]
+
+    if cmd == "cycle":
+        cmd_cycle()
+    elif cmd == "toggle":
+        cmd_toggle()
+    elif cmd == "on":
+        cmd_on()
+    elif cmd == "off":
+        cmd_off()
+    elif cmd == "status":
+        cmd_status()
+    elif cmd == "burst":
+        cmd_burst(args)
+    elif cmd in ("set-clicks", "clicks", "set"):
+        cmd_set_clicks(args)
+    elif cmd in ("set-delay", "delay"):
+        cmd_set_delay(args)
+    elif cmd == "start":
+        start_daemon_background()
+        print("Daemon iniciado en background.")
+    elif cmd == "stop":
+        cmd_stop()
+    elif cmd == "daemon":
+        run_daemon()
+    else:
+        print(f"Comando desconocido: {cmd}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
